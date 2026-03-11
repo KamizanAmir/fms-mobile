@@ -5,7 +5,6 @@ import {
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
-// 1. Remove PROVIDER_GOOGLE, Import UrlTile
 import MapView, { Marker, UrlTile } from 'react-native-maps';
 import api from '../services/api';
 import { LOCATION_TASK_NAME } from '../utils/LocationTask';
@@ -16,7 +15,45 @@ export default function TripScreen({ route, navigation }) {
     const [odo, setOdo] = useState('');
     const [currentLoc, setCurrentLoc] = useState(null);
     const [loading, setLoading] = useState(false);
+    const [etaInfo, setEtaInfo] = useState({ distance: '--', mins: '--' });
     const mapRef = useRef(null);
+
+    // ETA Calculator (Runs every 30 seconds if Active)
+    useEffect(() => {
+        let etaInterval;
+
+        const fetchETA = async () => {
+            // Only run if we actually have destination coordinates from the DB
+            if (!trip.destination_lat || !trip.destination_lng) return;
+
+            try {
+                // Grab the fresh current location silently
+                const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+                const { latitude, longitude } = loc.coords;
+
+                // Ping OSRM (OSRM uses Longitude, Latitude order!)
+                const url = `http://router.project-osrm.org/route/v1/driving/${longitude},${latitude};${trip.destination_lng},${trip.destination_lat}?overview=false`;
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.routes && data.routes.length > 0) {
+                    const distanceKm = (data.routes[0].distance / 1000).toFixed(1);
+                    const durationMin = Math.ceil(data.routes[0].duration / 60);
+                    setEtaInfo({ distance: distanceKm, mins: durationMin });
+                }
+            } catch (error) {
+                // Silently fail if network drops, it will try again in 30 seconds
+            }
+        };
+
+        // If trip is ongoing (Status 9), fetch immediately, then every 30 seconds
+        if (status === 9) {
+            fetchETA();
+            etaInterval = setInterval(fetchETA, 30000);
+        }
+
+        return () => clearInterval(etaInterval);
+    }, [status, trip.destination_lat, trip.destination_lng]);
 
     useEffect(() => {
         checkStatusAndLocation();
@@ -57,7 +94,6 @@ export default function TripScreen({ route, navigation }) {
         if (!odo) return Alert.alert("Odometer Required", "Please enter current mileage.");
 
         try {
-            // Must have foreground before requesting background
             const { status: fgPerm } = await Location.requestForegroundPermissionsAsync();
             if (fgPerm !== 'granted') {
                 return Alert.alert("Denied", "Foreground location required before background tracking.");
@@ -65,8 +101,6 @@ export default function TripScreen({ route, navigation }) {
 
             const { status: bgPerm } = await Location.requestBackgroundPermissionsAsync();
             if (bgPerm !== 'granted') {
-                // Even if denied, log the trip but maybe fallback to a local solution if you still need it
-                // We return here to be strict with tracking.
                 return Alert.alert("Denied", "Background location required for tracking.");
             }
 
@@ -75,9 +109,9 @@ export default function TripScreen({ route, navigation }) {
             await SecureStore.setItemAsync('active_trip_id', String(trip.trip_id));
 
             await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-                accuracy: Location.Accuracy.Highest, // Boost accuracy for testing
-                timeInterval: 5000,  // Check every 5 seconds
-                distanceInterval: 0, // 0 meters (Trigger based on time, even if standing still)
+                accuracy: Location.Accuracy.Highest,
+                timeInterval: 5000,
+                distanceInterval: 0,
                 foregroundService: {
                     notificationTitle: "FMS Active",
                     notificationBody: "Logging trip data..."
@@ -94,7 +128,6 @@ export default function TripScreen({ route, navigation }) {
         }
     };
 
-    // --- SWAP DRIVER LOGIC ---
     const swapDriver = async () => {
         if (!odo) return Alert.alert("Required", "Enter current Odometer to swap.");
         Alert.alert("Swap Driver?", "This will end your driving session. Another driver must take over.", [
@@ -106,14 +139,10 @@ export default function TripScreen({ route, navigation }) {
     const executeSwap = async () => {
         setLoading(true);
         try {
-            // 1. Stop tracking
             const hasStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
             if (hasStarted) await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
 
-            // 2. Call Swap API (Ensure you added this route to Laravel!)
             await api.post(`/driver/trip/${trip.trip_id}/swap`, { odometer: odo });
-
-            // 3. Cleanup local state
             await SecureStore.deleteItemAsync('active_trip_id');
 
             Alert.alert("Swapped", "Your session has ended. Handing over to next driver.");
@@ -121,7 +150,6 @@ export default function TripScreen({ route, navigation }) {
         } catch (e) { Alert.alert("Error", "Failed to swap driver"); }
         setLoading(false);
     }
-    // ---------------------------
 
     const stopTrip = async () => {
         if (!odo) return Alert.alert("Required", "Enter closing Odometer");
@@ -152,17 +180,13 @@ export default function TripScreen({ route, navigation }) {
                     <MapView
                         ref={mapRef}
                         style={styles.map}
-                        // using default mapType instead of none to avoid Fabric crash
-                        // mapType="standard"
                         initialRegion={currentLoc}
                         showsUserLocation={true}
                         followsUserLocation={true}
-                        loadingEnabled={false} // Disable loading to prevent eternal spinner if Google base map is rate-limited
-                        provider={null} // Force default provider (Apple Maps on iOS, Google Maps on Android)
+                        loadingEnabled={false}
+                        provider={null}
                     >
-                        {/* 3. UrlTile loads Free OpenStreetMap Images over the dummy Google Maps instance */}
                         <UrlTile
-                            // This uses CartoDB's "Positron" map (Clean, professional, free for dev)
                             urlTemplate="https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
                             maximumZ={19}
                             flipY={false}
@@ -177,6 +201,20 @@ export default function TripScreen({ route, navigation }) {
                 <View style={styles.destOverlay}>
                     <Text style={styles.destLabel}>DESTINATION</Text>
                     <Text style={styles.destText} numberOfLines={1}>{trip.destination_to}</Text>
+
+                    {/* ETA ROW: Only shows if trip is active AND coordinates exist */}
+                    {status === 9 && trip.destination_lat && (
+                        <View style={styles.etaRow}>
+                            <View style={styles.etaItem}>
+                                <Ionicons name="navigate" size={16} color="#93C5FD" />
+                                <Text style={styles.etaText}>{etaInfo.distance} km</Text>
+                            </View>
+                            <View style={styles.etaItem}>
+                                <Ionicons name="time" size={16} color="#93C5FD" />
+                                <Text style={styles.etaText}>{etaInfo.mins} min</Text>
+                            </View>
+                        </View>
+                    )}
                 </View>
             </View>
 
@@ -245,6 +283,10 @@ const styles = StyleSheet.create({
     destOverlay: { position: 'absolute', bottom: 20, left: 20, right: 20, backgroundColor: 'rgba(30, 58, 138, 0.9)', padding: 15, borderRadius: 12, elevation: 5 },
     destLabel: { color: '#93C5FD', fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 4 },
     destText: { color: '#fff', fontSize: 20, fontWeight: '800' },
+
+    etaRow: { flexDirection: 'row', marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.2)' },
+    etaItem: { flexDirection: 'row', alignItems: 'center', marginRight: 20 },
+    etaText: { color: '#fff', fontSize: 14, fontWeight: '700', marginLeft: 6 },
 
     controls: { flex: 1, padding: 24, backgroundColor: '#fff', borderTopLeftRadius: 30, borderTopRightRadius: 30, marginTop: -30, shadowColor: "#000", shadowOffset: { width: 0, height: -3 }, shadowOpacity: 0.1, shadowRadius: 5, elevation: 10 },
     statusRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 25 },
