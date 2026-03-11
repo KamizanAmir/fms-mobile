@@ -75,9 +75,9 @@ export default function TripScreen({ route, navigation }) {
             await SecureStore.setItemAsync('active_trip_id', String(trip.trip_id));
 
             await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-                accuracy: Location.Accuracy.High,
-                timeInterval: 10000,
-                distanceInterval: 20,
+                accuracy: Location.Accuracy.Highest, // Boost accuracy for testing
+                timeInterval: 5000,  // Check every 5 seconds
+                distanceInterval: 0, // 0 meters (Trigger based on time, even if standing still)
                 foregroundService: {
                     notificationTitle: "FMS Active",
                     notificationBody: "Logging trip data..."
