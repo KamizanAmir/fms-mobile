@@ -5,7 +5,8 @@ import {
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
-import MapView, { Marker, UrlTile } from 'react-native-maps';
+// ADDED Polyline import here
+import MapView, { Marker, UrlTile, Polyline } from 'react-native-maps';
 import api from '../services/api';
 import { LOCATION_TASK_NAME } from '../utils/LocationTask';
 
@@ -16,23 +17,24 @@ export default function TripScreen({ route, navigation }) {
     const [currentLoc, setCurrentLoc] = useState(null);
     const [loading, setLoading] = useState(false);
     const [etaInfo, setEtaInfo] = useState({ distance: '--', mins: '--' });
+
+    // NEW STATE: Holds the coordinates to draw the blue route line
+    const [routeCoords, setRouteCoords] = useState([]);
     const mapRef = useRef(null);
 
-    // ETA Calculator (Runs every 30 seconds if Active)
+    // ETA Calculator & Route Fetcher (Runs every 30 seconds if Active)
     useEffect(() => {
         let etaInterval;
 
         const fetchETA = async () => {
-            // Only run if we actually have destination coordinates from the DB
             if (!trip.destination_lat || !trip.destination_lng) return;
 
             try {
-                // Grab the fresh current location silently
                 const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
                 const { latitude, longitude } = loc.coords;
 
-                // Ping OSRM (OSRM uses Longitude, Latitude order!)
-                const url = `http://router.project-osrm.org/route/v1/driving/${longitude},${latitude};${trip.destination_lng},${trip.destination_lat}?overview=false`;
+                // Ping OSRM and ask for the full geometry to draw the line
+                const url = `http://router.project-osrm.org/route/v1/driving/${longitude},${latitude};${trip.destination_lng},${trip.destination_lat}?overview=full&geometries=geojson`;
                 const response = await fetch(url);
                 const data = await response.json();
 
@@ -40,13 +42,19 @@ export default function TripScreen({ route, navigation }) {
                     const distanceKm = (data.routes[0].distance / 1000).toFixed(1);
                     const durationMin = Math.ceil(data.routes[0].duration / 60);
                     setEtaInfo({ distance: distanceKm, mins: durationMin });
+
+                    // Parse the route geometry into React Native Maps format
+                    const coords = data.routes[0].geometry.coordinates.map(coord => ({
+                        latitude: coord[1], // OSRM returns [Lng, Lat], we need to flip it
+                        longitude: coord[0]
+                    }));
+                    setRouteCoords(coords);
                 }
             } catch (error) {
-                // Silently fail if network drops, it will try again in 30 seconds
+                console.log("OSRM Fetch Error:", error);
             }
         };
 
-        // If trip is ongoing (Status 9), fetch immediately, then every 30 seconds
         if (status === 9) {
             fetchETA();
             etaInterval = setInterval(fetchETA, 30000);
@@ -70,8 +78,8 @@ export default function TripScreen({ route, navigation }) {
                 setCurrentLoc({
                     latitude: loc.coords.latitude,
                     longitude: loc.coords.longitude,
-                    latitudeDelta: 0.005,
-                    longitudeDelta: 0.005,
+                    latitudeDelta: 0.05, // Zoomed out slightly so you can see the route
+                    longitudeDelta: 0.05,
                 });
             } else {
                 Alert.alert("Permission Required", "This screen requires location access to load the map.");
@@ -174,7 +182,6 @@ export default function TripScreen({ route, navigation }) {
 
     return (
         <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
-            {/* MAP SECTION */}
             <View style={styles.mapContainer}>
                 {currentLoc ? (
                     <MapView
@@ -191,6 +198,23 @@ export default function TripScreen({ route, navigation }) {
                             maximumZ={19}
                             flipY={false}
                         />
+
+                        {/* NEW: Draws the route line on the map! */}
+                        {routeCoords.length > 0 && (
+                            <Polyline
+                                coordinates={routeCoords}
+                                strokeColor="#2563EB" // Solid Blue
+                                strokeWidth={5}
+                            />
+                        )}
+
+                        {/* NEW: Draws a pin at the destination */}
+                        {trip.destination_lat && trip.destination_lng && (
+                            <Marker
+                                coordinate={{ latitude: parseFloat(trip.destination_lat), longitude: parseFloat(trip.destination_lng) }}
+                                title={trip.destination_to}
+                            />
+                        )}
                     </MapView>
                 ) : (
                     <View style={styles.mapLoading}>
@@ -202,7 +226,6 @@ export default function TripScreen({ route, navigation }) {
                     <Text style={styles.destLabel}>DESTINATION</Text>
                     <Text style={styles.destText} numberOfLines={1}>{trip.destination_to}</Text>
 
-                    {/* ETA ROW: Only shows if trip is active AND coordinates exist */}
                     {status === 9 && trip.destination_lat && (
                         <View style={styles.etaRow}>
                             <View style={styles.etaItem}>
@@ -218,7 +241,6 @@ export default function TripScreen({ route, navigation }) {
                 </View>
             </View>
 
-            {/* CONTROLS SECTION */}
             <View style={styles.controls}>
                 <View style={styles.statusRow}>
                     <View>
@@ -232,7 +254,6 @@ export default function TripScreen({ route, navigation }) {
 
                 {loading && <ActivityIndicator style={{ marginBottom: 20 }} size="large" color="#2563EB" />}
 
-                {/* ACTION BUTTONS */}
                 {!loading && status === 5 && (
                     <TouchableOpacity style={styles.btnPrimary} onPress={acceptTrip}>
                         <Text style={styles.btnText}>ACCEPT ASSIGNMENT</Text>
@@ -249,19 +270,16 @@ export default function TripScreen({ route, navigation }) {
                     </View>
                 )}
 
-                {/* STOP OR SWAP SECTION */}
                 {!loading && status === 9 && (
                     <View>
                         <TextInput style={styles.input} placeholder="Enter Current/End Odometer" keyboardType="numeric" value={odo} onChangeText={setOdo} />
 
                         <View style={styles.rowButtons}>
-                            {/* SWAP BUTTON */}
                             <TouchableOpacity style={[styles.rowBtn, styles.btnOrange]} onPress={swapDriver}>
                                 <MaterialIcons name="swap-horiz" size={24} color="white" style={{ marginRight: 5 }} />
                                 <Text style={styles.rowBtnText}>SWAP DRIVER</Text>
                             </TouchableOpacity>
 
-                            {/* STOP BUTTON */}
                             <TouchableOpacity style={[styles.rowBtn, styles.btnRed]} onPress={stopTrip}>
                                 <Ionicons name="stop-circle" size={24} color="white" style={{ marginRight: 5 }} />
                                 <Text style={styles.rowBtnText}>COMPLETE TRIP</Text>
