@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
+import MapView, { Marker, UrlTile, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import {
     View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, ScrollView, Dimensions, ActivityIndicator
 } from 'react-native';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
-// ADDED Polyline import here
-import MapView, { Marker, UrlTile, Polyline } from 'react-native-maps';
 import api from '../services/api';
 import { LOCATION_TASK_NAME } from '../utils/LocationTask';
 
@@ -72,15 +71,25 @@ export default function TripScreen({ route, navigation }) {
         try {
             const { status: perm } = await Location.requestForegroundPermissionsAsync();
             if (perm === 'granted') {
-                const loc = await Location.getCurrentPositionAsync({
-                    accuracy: Location.Accuracy.Balanced,
-                });
-                setCurrentLoc({
-                    latitude: loc.coords.latitude,
-                    longitude: loc.coords.longitude,
-                    latitudeDelta: 0.05, // Zoomed out slightly so you can see the route
-                    longitudeDelta: 0.05,
-                });
+
+                // 1. Try to get the last known position first (Fast, fixes emulator hang)
+                let loc = await Location.getLastKnownPositionAsync({});
+
+                // 2. If no cached location exists, fallback to current position
+                if (!loc) {
+                    loc = await Location.getCurrentPositionAsync({
+                        accuracy: Location.Accuracy.Balanced,
+                    });
+                }
+
+                if (loc) {
+                    setCurrentLoc({
+                        latitude: loc.coords.latitude,
+                        longitude: loc.coords.longitude,
+                        latitudeDelta: 0.05,
+                        longitudeDelta: 0.05,
+                    });
+                }
             } else {
                 Alert.alert("Permission Required", "This screen requires location access to load the map.");
             }
@@ -191,7 +200,7 @@ export default function TripScreen({ route, navigation }) {
                         showsUserLocation={true}
                         followsUserLocation={true}
                         loadingEnabled={false}
-                        provider={null}
+                        provider={PROVIDER_GOOGLE} // <-- Changed this
                     >
                         <UrlTile
                             urlTemplate="https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
@@ -199,19 +208,21 @@ export default function TripScreen({ route, navigation }) {
                             flipY={false}
                         />
 
-                        {/* NEW: Draws the route line on the map! */}
                         {routeCoords.length > 0 && (
                             <Polyline
                                 coordinates={routeCoords}
-                                strokeColor="#2563EB" // Solid Blue
+                                strokeColor="#2563EB"
                                 strokeWidth={5}
                             />
                         )}
 
-                        {/* NEW: Draws a pin at the destination */}
-                        {trip.destination_lat && trip.destination_lng && (
+                        {/* Added strict NaN checks to prevent Native bridge crashes */}
+                        {trip.destination_lat && trip.destination_lng && !isNaN(parseFloat(trip.destination_lat)) && (
                             <Marker
-                                coordinate={{ latitude: parseFloat(trip.destination_lat), longitude: parseFloat(trip.destination_lng) }}
+                                coordinate={{
+                                    latitude: parseFloat(trip.destination_lat),
+                                    longitude: parseFloat(trip.destination_lng)
+                                }}
                                 title={trip.destination_to}
                             />
                         )}
